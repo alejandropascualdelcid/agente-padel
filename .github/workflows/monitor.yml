@@ -1,0 +1,49 @@
+name: Monitor pádel
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # UTC; GitHub puede retrasar ejecuciones varios minutos
+  workflow_dispatch:
+
+concurrency:
+  group: padel-monitor
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write   # necesario para guardar la caché de estado
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      # Estado anti-spam persistido entre ejecuciones vía caché
+      - name: Restaurar estado
+        uses: actions/cache/restore@v4
+        with:
+          path: state.json
+          key: padel-state-${{ github.run_id }}
+          restore-keys: padel-state-
+
+      - name: Ejecutar monitor
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python monitor_padel.py --once
+
+      - name: Guardar estado
+        if: always() && hashFiles('state.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: state.json
+          key: padel-state-${{ github.run_id }}-${{ github.run_attempt }}
