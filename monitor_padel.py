@@ -250,12 +250,13 @@ def filter_slots(
                     price=str(s.get("price") or "").strip(),
                 )
             )
-    return sorted(slots, key=lambda x: (x.day, x.start, _court_sort_key(x.court)))
+    return sorted(slots, key=slot_sort_key)
 
 
-def _court_sort_key(name: str):
-    digits = "".join(ch for ch in name if ch.isdigit())
-    return (int(digits) if digits else 999, name)
+def slot_sort_key(slot: Slot):
+    """Día, hora y número de pista como número (Padel 3 antes que Padel 11)."""
+    digits = "".join(ch for ch in slot.court if ch.isdigit())
+    return (slot.day, slot.start, int(digits) if digits else 999, slot.court)
 
 
 # --------------------------------------------------------------------------- #
@@ -370,7 +371,7 @@ def run_once(cfg: Config, client: httpx.Client, dry_run: bool = False, now: date
             current[s.key] = s
         log.info("%s: %d slots en franja", day_label(d), sum(1 for s in current.values() if s.day == d))
 
-    new_slots = sorted(s for k, s in current.items() if k not in previous)
+    new_slots = sorted((s for k, s in current.items() if k not in previous), key=slot_sort_key)
     sent_ok = True
     if new_slots:
         log.info("%d slots nuevos -> notificando", len(new_slots))

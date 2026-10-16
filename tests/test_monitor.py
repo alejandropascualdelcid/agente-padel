@@ -161,3 +161,15 @@ def test_all_days_failing_returns_error(tmp_path):
     days = {d.isoformat() for d in mp.target_days(now.date(), 12)}
     with make_client([], fail_dates=days) as client:
         assert mp.run_once(c, client, now=now) == 1
+
+
+def test_courts_sorted_numerically(tmp_path):
+    c = cfg(tmp_path)
+    now = datetime(2026, 10, 15, 10, 0, tzinfo=mp.TZ)
+    names = {RID_A: "Padel 11", RID_B: "Padel 3"}
+    raw = [{"resource_id": rid, "start_date": "2026-10-16",
+            "slots": [{"start_time": "18:00:00", "duration": 90, "price": "4.29 EUR"}]}
+           for rid in (RID_A, RID_B)]
+    slots = mp.filter_slots(raw, date(2026, 10, 16), c, names, now)
+    text = mp.format_messages(sorted(slots, key=mp.slot_sort_key), c)[0]
+    assert text.index("Padel 3") < text.index("Padel 11")
