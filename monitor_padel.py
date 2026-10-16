@@ -57,6 +57,7 @@ WEEKDAYS_ES = ("Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom")
 WEEKDAY_LETTERS = ("L", "M", "X", "J", "V", "S", "D")
 DURATION_OPTIONS = (60, 90, 120)
 DAYS_AHEAD_OPTIONS = (7, 12, 14)
+BLOCKED_BACKOFF = 300  # segundos de espera tras un 403 de Cloudflare en modo --loop
 TELEGRAM_MAX_LEN = 4000  # límite real 4096; dejamos margen
 
 DEFAULT_CLUB = {
@@ -94,6 +95,7 @@ class Settings:
     state_file: Path
     config_file: Path
     api_tz: ZoneInfo = ZoneInfo("UTC")
+    request_delay: float = 0.0  # pausa entre consultas a Playtomic (evita el bloqueo de Cloudflare)
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -104,6 +106,7 @@ class Settings:
             state_file=Path(os.getenv("STATE_FILE", "state.json")),
             config_file=Path(os.getenv("CONFIG_FILE", "config.json")),
             api_tz=ZoneInfo(os.getenv("API_TIME_ZONE", "UTC")),
+            request_delay=float(os.getenv("REQUEST_DELAY", "0.5")),
         )
 
 
@@ -214,6 +217,10 @@ def slot_sort_key(slot: Slot):
 # --------------------------------------------------------------------------- #
 # HTTP Playtomic
 # --------------------------------------------------------------------------- #
+class Blocked(httpx.HTTPError):
+    """Cloudflare (403): Playtomic nos está frenando. Hay que parar y esperar."""
+
+
 def get_json(client: httpx.Client, url: str, params: dict | None = None, retries: int = 2):
     """GET con reintentos para 429/5xx/errores de red. Lanza la última excepción."""
     for attempt in range(retries + 1):
@@ -226,8 +233,7 @@ def get_json(client: httpx.Client, url: str, params: dict | None = None, retries
         except (httpx.TransportError, httpx.HTTPStatusError) as exc:
             status = getattr(getattr(exc, "response", None), "status_code", None)
             if status == 403:
-                log.warning("403 en %s: bloqueo de Cloudflare (IP de datacenter?)", url)
-                raise
+                raise Blocked("Playtomic ha bloqueado temporalmente las consultas (403)") from exc
             if attempt >= retries:
                 raise
             time.sleep(2 ** attempt)
@@ -866,31 +872,40 @@ class ScanResult:
     current: dict[str, Slot]
     failed: set[str]  # prefijos "fecha|tenant_id" que no se pudieron consultar
     queried: int
+    blocked: bool = False
 
 
 def scan(client: httpx.Client, settings: Settings, prefs: Prefs, state: dict, now: datetime) -> ScanResult:
     cache: dict[str, dict[str, str]] = state.setdefault("court_names", {})
     result = ScanResult(current={}, failed=set(), queried=0)
     days = target_days(now.date(), prefs)
-    for club in prefs.active_clubs:
+    plan = [(club, d) for club in prefs.active_clubs for d in days]
+    result.queried = len(plan)
+    names_refreshed: set[str] = set()
+    for i, (club, d) in enumerate(plan):
         names = cache.setdefault(club.tenant_id, {})
-        names_refreshed = False
-        for d in days:
-            result.queried += 1
-            try:
-                raw = fetch_availability(client, club, d)
-            except (httpx.HTTPError, ValueError) as exc:
-                log.error("%s %s: fallo consultando: %s", club.name, d, exc)
-                result.failed.add(f"{d.isoformat()}|{club.tenant_id}")
-                continue
-            # Nombres de pistas: solo se baja la web del club si aparece una pista desconocida.
-            if not names_refreshed and any(r.get("resource_id") not in names for r in raw):
-                names.update(fetch_court_names(client, club))
-                names_refreshed = True
-            slots = filter_slots(raw, club, d, prefs, names, now, settings.api_tz)
-            for s in slots:
-                result.current[s.key] = s
-            log.info("%s %s: %d turnos en franja", club.name, day_label(d), len(slots))
+        if i and settings.request_delay:
+            time.sleep(settings.request_delay)
+        try:
+            raw = fetch_availability(client, club, d)
+        except Blocked as exc:
+            # Insistir solo empeora el bloqueo: se para aquí y se reintenta más tarde.
+            log.warning("%s. Se para la búsqueda y se reintentará más tarde.", exc)
+            result.blocked = True
+            result.failed |= {f"{dd.isoformat()}|{cc.tenant_id}" for cc, dd in plan[i:]}
+            break
+        except (httpx.HTTPError, ValueError) as exc:
+            log.error("%s %s: fallo consultando: %s", club.name, day_label(d), exc)
+            result.failed.add(f"{d.isoformat()}|{club.tenant_id}")
+            continue
+        # Nombres de pistas: solo se baja la web del club si aparece una pista desconocida.
+        if club.tenant_id not in names_refreshed and any(r.get("resource_id") not in names for r in raw):
+            names.update(fetch_court_names(client, club))
+            names_refreshed.add(club.tenant_id)
+        slots = filter_slots(raw, club, d, prefs, names, now, settings.api_tz)
+        for s in slots:
+            result.current[s.key] = s
+        log.info("%s %s: %d turnos en franja", club.name, day_label(d), len(slots))
     return result
 
 
@@ -950,6 +965,9 @@ def run_cycle(
         messages = format_messages(new_slots, prefs) if new_slots else []
         new_keys = {s.key for s in new_slots}
         log.info("%d turnos nuevos", len(new_slots))
+    if full_listing and res.blocked:
+        messages.append("⚠️ Playtomic ha frenado las consultas; la lista puede estar incompleta. "
+                        "Reintentaré en unos minutos.")
     sent_ok = notify(client, settings, messages, dry_run)
 
     # Si Telegram falla, no marcamos los nuevos como vistos (se reintenta la próxima vez).
@@ -959,6 +977,7 @@ def run_cycle(
     seen = {k for k in seen if k.split("|", 1)[0] >= today}  # purga de días pasados
     state["available"] = sorted(seen)
     state["updated_at"] = now.isoformat()
+    state["blocked"] = res.blocked
     return 1 if res.queried and len(res.failed) == res.queried else 0
 
 
@@ -991,7 +1010,11 @@ def run_loop(settings: Settings, client: httpx.Client, dry_run: bool = False) ->
             prefs = load_prefs(settings.config_file)
             if time.monotonic() >= next_scan or full_listing:
                 run_cycle(client, settings, prefs, state, datetime.now(TZ), dry_run, full_listing)
-                next_scan, full_listing = time.monotonic() + settings.interval, False
+                delay = settings.interval
+                if state.get("blocked"):
+                    delay = max(settings.interval, BLOCKED_BACKOFF)
+                    log.warning("Bloqueo de Playtomic: próxima búsqueda en %d s", delay)
+                next_scan, full_listing = time.monotonic() + delay, False
             if dry_run:
                 time.sleep(max(0.0, next_scan - time.monotonic()))
                 continue

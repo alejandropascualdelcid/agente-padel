@@ -403,3 +403,18 @@ def test_clubs_with_same_name_not_interleaved():
         slots += mp.filter_slots(availability(d), twin, day, prefs, {}, NOW)
     text = mp.format_messages(slots, prefs)[0]
     assert text.count("🏟") == 2
+
+
+def test_cloudflare_block_stops_scan_and_keeps_state(tmp_path):
+    s = settings(tmp_path)
+    srv = FakeServer()
+    with srv.client() as client:
+        mp.run_once(s, client, now=NOW)
+        calls_before = len(srv.availability_calls)
+        srv.fail_dates = {d.isoformat() for d in mp.target_days(NOW.date(), mp.Prefs())}
+        assert mp.run_once(s, client, now=NOW) == 1
+        assert len(srv.availability_calls) - calls_before == 1  # no insiste tras el 403
+        assert mp.load_state(s.state_file)["blocked"] is True
+        srv.fail_dates = set()
+        mp.run_once(s, client, now=NOW)
+    assert len(srv.sent) == 1  # nada se re-avisa tras el bloqueo
