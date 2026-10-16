@@ -1,8 +1,9 @@
 name: Monitor pádel
 
+# Ejecución programada desactivada: Cloudflare bloquea (403) las IPs de los runners
+# de GitHub y, además, el cron de GitHub solo se lanzaba cada varias horas.
+# Se deja el lanzamiento manual por si Playtomic deja de bloquear en el futuro.
 on:
-  schedule:
-    - cron: "*/5 * * * *"   # UTC; GitHub puede retrasar ejecuciones varios minutos
   workflow_dispatch:
 
 concurrency:
