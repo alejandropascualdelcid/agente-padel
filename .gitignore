@@ -6,3 +6,5 @@ __pycache__/
 .venv/
 .pytest_cache/
 config.json.tmp
+config.local.json
+config.local.json.tmp

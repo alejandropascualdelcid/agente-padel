@@ -10,10 +10,11 @@ Uso:
 
 Variables de entorno (o fichero .env en el mismo directorio):
     TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID   (obligatorias salvo en --dry-run)
-    INTERVAL_SECONDS=60, STATE_FILE=state.json, CONFIG_FILE=config.json, API_TIME_ZONE=UTC
+    INTERVAL_SECONDS=60, STATE_FILE=state.json, CONFIG_FILE=config.local.json, API_TIME_ZONE=UTC
 
 Las preferencias (clubes, días, franja, duración, pausa) viven en CONFIG_FILE y se
-cambian desde el bot de Telegram (/menu) o editando el fichero.
+cambian desde el bot de Telegram (/menu) o editando el fichero. Si CONFIG_FILE aún no
+existe, se parte del config.json del repo (que git controla y el bot nunca modifica).
 """
 
 from __future__ import annotations
@@ -85,6 +86,18 @@ def load_dotenv(path: Path) -> None:
         os.environ.setdefault(key.strip(), value.strip().strip("'\""))
 
 
+LOCAL_CONFIG = "config.local.json"
+
+
+def _local_config_path(value: str) -> Path:
+    """El bot nunca escribe en el config.json del repo: así `git pull` no choca con
+    los cambios hechos desde Telegram (los .env antiguos traían CONFIG_FILE=config.json)."""
+    path = Path(value)
+    if path.name == "config.json" and path.resolve().parent == Path(__file__).resolve().parent:
+        return path.with_name(LOCAL_CONFIG)
+    return path
+
+
 @dataclass(frozen=True)
 class Settings:
     """Lo que no cambia en tiempo de ejecución (secretos y rutas)."""
@@ -104,7 +117,7 @@ class Settings:
             chat_id=os.getenv("TELEGRAM_CHAT_ID", "").strip(),
             interval=int(os.getenv("INTERVAL_SECONDS", "60")),
             state_file=Path(os.getenv("STATE_FILE", "state.json")),
-            config_file=Path(os.getenv("CONFIG_FILE", "config.json")),
+            config_file=_local_config_path(os.getenv("CONFIG_FILE", LOCAL_CONFIG)),
             api_tz=ZoneInfo(os.getenv("API_TIME_ZONE", "UTC")),
             request_delay=float(os.getenv("REQUEST_DELAY", "0.5")),
         )

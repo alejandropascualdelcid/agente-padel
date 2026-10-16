@@ -424,3 +424,11 @@ def test_cloudflare_block_stops_scan_and_keeps_state(tmp_path):
         srv.fail_dates = set()
         mp.run_once(s, client, now=NOW)
     assert len(srv.sent) == 1  # nada se re-avisa tras el bloqueo
+
+
+def test_bot_never_writes_repo_config(monkeypatch):
+    monkeypatch.setenv("CONFIG_FILE", "config.json")
+    monkeypatch.chdir(Path(mp.__file__).resolve().parent)
+    assert mp.Settings.from_env().config_file.name == "config.local.json"
+    monkeypatch.setenv("CONFIG_FILE", "/data/config.json")
+    assert str(mp.Settings.from_env().config_file) == "/data/config.json"

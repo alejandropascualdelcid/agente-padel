@@ -16,9 +16,9 @@ Por defecto vigila **Coslada Dreamfit**, de **lunes a viernes**, en los **próxi
 | Parar o reactivar los avisos | `/pausa` · `/reanudar` |
 
 - **Quién puede usarlo:** el bot solo obedece al chat de `TELEGRAM_CHAT_ID`.
-- **Dónde se guarda la configuración:** en `config.json`. En GitHub Actions, cada cambio hecho desde el bot se guarda con un commit automático.
-- **Cuánto tarda en responder:** en GitHub Actions, entre 5 y 15 minutos, porque el bot solo despierta en cada ejecución. En modo `--loop` (Mac, Docker) responde al instante.
-- ⚠️ **Una sola copia a la vez.** No tengas el bot funcionando a la vez en GitHub y en tu Mac: los dos competirían por los mensajes de Telegram.
+- **Dónde se guarda la configuración:** lo que cambias desde el bot va a `config.local.json`, que git ignora. La primera vez se parte de `config.json`, la configuración del repo. Así `git pull` nunca choca con tus cambios.
+- **Cuánto tarda en responder:** en modo `--loop` (Mac, Docker) responde al instante.
+- ⚠️ **Una sola copia a la vez.** No tengas el bot funcionando a la vez en dos sitios (por ejemplo, el Mac y una Raspberry Pi): los dos competirían por los mensajes de Telegram.
 
 ## Cómo funciona por dentro
 
@@ -44,16 +44,9 @@ python monitor_padel.py --loop             # bot al instante + escaneo cada 60 s
 python monitor_padel.py --add-club "https://playtomic.com/tenant/<id>"
 ```
 
-## GitHub Actions (24/7, gratis en un repo público)
+## GitHub Actions: descartado
 
-1. Ve a *Settings → Secrets and variables → Actions → New repository secret* y crea `TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID`.
-2. El workflow `.github/workflows/monitor.yml` se ejecuta cada 5 minutos, guarda el estado con `actions/cache` y hace commit de `config.json` cuando cambias algo desde el bot.
-3. Para lanzarlo a mano: *Actions → Monitor pádel → Run workflow*.
-
-Ten en cuenta que:
-- El cron de GitHub es *best effort*: a menudo se retrasa entre 5 y 15 minutos.
-- En repos públicos, GitHub desactiva los workflows programados tras 60 días sin actividad. Basta con reactivarlo desde la pestaña Actions.
-- Si Cloudflare responde 403 desde los runners, ejecútalo en local o en Docker desde una IP residencial.
+Lo probamos y no sirve: Cloudflare responde **403** a los servidores de GitHub desde la primera consulta, y además el cron de GitHub solo se lanzaba cada ~5 horas. El workflow queda solo con lanzamiento manual, por si algún día Playtomic deja de bloquear. Lo mismo pasará casi seguro con cualquier servidor en la nube: el agente tiene que funcionar **desde una conexión de casa** (tu Mac, una Raspberry Pi o un portátil viejo).
 
 ## Docker (Raspberry Pi, NAS, VPS…)
 
