@@ -9,7 +9,7 @@ Uso:
 Configuración por variables de entorno (o fichero .env en el mismo directorio):
     TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID   (obligatorias salvo en --dry-run)
     DAYS_AHEAD=12, START_MIN=18:30, START_MAX=21:00, SLOT_DURATION=90,
-    INTERVAL_SECONDS=60, STATE_FILE=state.json,
+    INTERVAL_SECONDS=60, STATE_FILE=state.json, API_TIME_ZONE=UTC,
     COURT_NAMES='{"<resource_id>": "Padel 1", ...}'  (opcional, fuerza nombres)
 """
 
@@ -83,6 +83,7 @@ class Config:
     interval: int
     state_file: Path
     court_names: dict[str, str]
+    api_tz: ZoneInfo = ZoneInfo("UTC")
 
     @classmethod
     def from_env(cls) -> Config:
@@ -96,6 +97,7 @@ class Config:
             interval=int(os.getenv("INTERVAL_SECONDS", "60")),
             state_file=Path(os.getenv("STATE_FILE", "state.json")),
             court_names=json.loads(os.getenv("COURT_NAMES", "") or "{}"),
+            api_tz=ZoneInfo(os.getenv("API_TIME_ZONE", "UTC")),
         )
 
 
@@ -206,26 +208,37 @@ def fetch_availability(client: httpx.Client, day: date) -> list[dict]:
     return data
 
 
+def slot_local_start(start_date: str, start_time: str, api_tz: ZoneInfo) -> datetime:
+    """Convierte la fecha/hora del slot (en la zona de la API, UTC) a hora de Madrid.
+
+    Comprobado con datos reales: el mismo turno de las 21:30 aparece como 19:30
+    antes del cambio de hora de octubre y como 20:30 después, así que la API
+    devuelve UTC. Se convierte con zoneinfo (respeta el horario de verano),
+    nunca con un desfase fijo.
+    """
+    naive = datetime.fromisoformat(f"{start_date[:10]}T{start_time[:8]}")
+    return naive.replace(tzinfo=api_tz).astimezone(TZ)
+
+
 def filter_slots(
     raw: list[dict], day: date, cfg: Config, names: dict[str, str], now: datetime
 ) -> list[Slot]:
-    """Aplica el filtro estricto. start_time YA es hora local de Madrid: sin desfases."""
-    is_today = day == now.date()
-    now_hm = now.strftime("%H:%M")
+    """Aplica el filtro estricto sobre la hora de inicio YA convertida a hora de Madrid."""
     slots: list[Slot] = []
     for resource in raw:
         rid = resource.get("resource_id", "")
-        # Algunas respuestas incluyen varios días; nos quedamos con el solicitado.
-        start_date = resource.get("start_date")
-        if start_date and start_date[:10] != day.isoformat():
-            continue
+        start_date = resource.get("start_date") or day.isoformat()
         for s in resource.get("slots") or []:
-            start = str(s.get("start_time", ""))[:5]
-            if s.get("duration") != cfg.duration:
+            if s.get("duration") != cfg.duration or not s.get("start_time"):
+                continue
+            local = slot_local_start(start_date, str(s["start_time"]), cfg.api_tz)
+            start = local.strftime("%H:%M")
+            # Nos quedamos solo con los turnos que en Madrid caen en el día pedido.
+            if local.date() != day:
                 continue
             if not (cfg.start_min <= start <= cfg.start_max):
                 continue
-            if is_today and start <= now_hm:
+            if local <= now:
                 continue
             slots.append(
                 Slot(

@@ -2,7 +2,7 @@
 
 Monitor de pistas de pádel libres en **Coslada Dreamfit** (Playtomic). Avisa por Telegram de las pistas libres de **lunes a viernes**, en los **próximos 12 días**, que **empiezan entre las 18:30 y las 21:00** y duran **90 minutos**.
 
-- `start_time` se compara tal cual llega de la API, que ya lo da en hora de Madrid. No se aplica ningún desfase.
+- La API devuelve `start_time` en **UTC**. Se convierte a hora de Madrid con `zoneinfo`, que respeta el cambio de hora, y nunca sumando un número fijo de horas. Comprobado con datos reales: el turno de las 21:30 llega como 19:30 en horario de verano y como 20:30 en horario de invierno.
 - Los nombres de las pistas ("Padel 7"…) se sacan cruzando el `resource_id` con la lista de pistas que trae la propia web del club, nunca por la posición en el array. Si alguno no se resuelve, se puede forzar con `COURT_NAMES`.
 - Anti-spam: `state.json` guarda los slots libres de la pasada anterior y solo se avisa de los nuevos. Si una pista se reserva y luego se vuelve a liberar, se avisa otra vez.
 

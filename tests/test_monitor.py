@@ -22,22 +22,23 @@ def cfg(tmp_path, **kw):
 
 
 def availability(day: str):
+    # Horas en UTC, como las devuelve la API. Comentarios = hora de Madrid en verano (+2).
     return [
         {
             "resource_id": RID_A,
             "start_date": day,
             "slots": [
-                {"start_time": "17:30:00", "duration": 90, "price": "4.29 EUR"},  # fuera de franja
-                {"start_time": "18:30:00", "duration": 90, "price": "4.29 EUR"},
-                {"start_time": "20:30:00", "duration": 60, "price": "3 EUR"},     # duración != 90
-                {"start_time": "21:00:00", "duration": 90, "price": "4.29 EUR"},  # límite incluido
-                {"start_time": "21:30:00", "duration": 90, "price": "4.29 EUR"},  # fuera
+                {"start_time": "15:30:00", "duration": 90, "price": "4.29 EUR"},  # 17:30 fuera
+                {"start_time": "16:30:00", "duration": 90, "price": "4.29 EUR"},  # 18:30
+                {"start_time": "18:30:00", "duration": 60, "price": "3 EUR"},     # duración != 90
+                {"start_time": "19:00:00", "duration": 90, "price": "4.29 EUR"},  # 21:00 incluido
+                {"start_time": "19:30:00", "duration": 90, "price": "4.29 EUR"},  # 21:30 fuera
             ],
         },
         {
             "resource_id": RID_B,
             "start_date": day,
-            "slots": [{"start_time": "20:00:00", "duration": 90, "price": "4.29 EUR"}],
+            "slots": [{"start_time": "18:00:00", "duration": 90, "price": "4.29 EUR"}],  # 20:00
         },
     ]
 
@@ -83,11 +84,25 @@ def test_target_days_only_weekdays():
     assert len(days) == 9
 
 
-def test_filter_no_timezone_shift(tmp_path):
+def test_filter_converts_utc_to_madrid(tmp_path):
     now = datetime(2026, 10, 15, 10, 0, tzinfo=mp.TZ)
     names = {RID_A: "Padel 6", RID_B: "Padel 1"}
     slots = mp.filter_slots(availability("2026-10-16"), date(2026, 10, 16), cfg(tmp_path), names, now)
     assert [(s.start, s.court) for s in slots] == [("18:30", "Padel 6"), ("20:00", "Padel 1"), ("21:00", "Padel 6")]
+
+
+def test_dst_change_real_case(tmp_path):
+    """Caso real: el turno de las 21:30 llegaba como 19:30 (CEST) y 20:30 (CET)."""
+    now = datetime(2026, 10, 16, 2, 0, tzinfo=mp.TZ)
+    c = cfg(tmp_path)
+    for day, utc in ((date(2026, 10, 22), "19:30:00"), (date(2026, 10, 26), "20:30:00")):
+        raw = [{"resource_id": RID_A, "start_date": day.isoformat(),
+                "slots": [{"start_time": utc, "duration": 90, "price": "4.29 EUR"}]}]
+        assert mp.filter_slots(raw, day, c, {}, now) == []
+    # Tras el cambio de hora, 18:30 en Madrid es 17:30 UTC.
+    raw = [{"resource_id": RID_A, "start_date": "2026-10-26",
+            "slots": [{"start_time": "17:30:00", "duration": 90, "price": "4.29 EUR"}]}]
+    assert [s.start for s in mp.filter_slots(raw, date(2026, 10, 26), c, {}, now)] == ["18:30"]
 
 
 def test_filter_skips_past_slots_today(tmp_path):
