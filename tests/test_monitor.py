@@ -17,6 +17,12 @@ COSLADA = mp.Club(**mp.DEFAULT_CLUB)
 OTHER = mp.Club(tenant_id=TENANT_2, name="Otro Club", page_url="https://playtomic.com/clubs/otro-club")
 
 
+@pytest.fixture(autouse=True)
+def no_bundled_config(tmp_path, monkeypatch):
+    # Los tests no deben leer el config.json real del repo.
+    monkeypatch.setattr(mp, "BUNDLED_CONFIG", tmp_path / "no-existe.json")
+
+
 def settings(tmp_path):
     return mp.Settings(
         bot_token="T", chat_id="1", interval=60,

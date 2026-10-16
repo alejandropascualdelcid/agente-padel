@@ -160,9 +160,12 @@ class Prefs:
         return [c for c in self.clubs if c.enabled]
 
 
+BUNDLED_CONFIG = Path(__file__).with_name("config.json")
+
+
 def load_prefs(path: Path) -> Prefs:
     """Lee config.json; si no existe usa el del repo junto al script, o los valores por defecto."""
-    for candidate in (path, Path(__file__).with_name("config.json")):
+    for candidate in (path, BUNDLED_CONFIG):
         if candidate.is_file():
             try:
                 return Prefs.from_dict(json.loads(candidate.read_text(encoding="utf-8")))
