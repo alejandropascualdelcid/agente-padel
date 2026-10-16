@@ -19,6 +19,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 import time
 from dataclasses import dataclass
@@ -37,10 +38,6 @@ CLUB_SLUG = "coslada-dreamfit"
 CLUB_NAME = "Coslada Dreamfit"
 CLUB_URL = f"https://playtomic.com/clubs/{CLUB_SLUG}"
 AVAILABILITY_URL = "https://playtomic.com/api/clubs/availability"
-RESOURCE_URLS = (
-    f"https://playtomic.com/api/clubs/{TENANT_ID}/resources?sport_id={SPORT_ID}",
-    f"https://api.playtomic.io/v1/tenants/{TENANT_ID}",
-)
 TZ = ZoneInfo("Europe/Madrid")
 HTTP_TIMEOUT = httpx.Timeout(10.0, connect=8.0)
 
@@ -144,34 +141,45 @@ def get_json(client: httpx.Client, url: str, params: dict | None = None, retries
 # --------------------------------------------------------------------------- #
 # Nombres de pistas
 # --------------------------------------------------------------------------- #
-def _collect_names(node, out: dict[str, str]) -> None:
-    """Recorre JSON arbitrario buscando objetos con (resource_id|id) + name."""
-    if isinstance(node, dict):
-        rid = node.get("resource_id") or node.get("id")
-        name = node.get("name")
-        if isinstance(rid, str) and isinstance(name, str) and rid != TENANT_ID:
-            sport = node.get("sport_id")
-            if sport in (None, SPORT_ID):
-                out.setdefault(rid, name.strip())
-        for value in node.values():
-            _collect_names(value, out)
-    elif isinstance(node, list):
-        for item in node:
-            _collect_names(item, out)
+_UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+_RESOURCE_OBJ = re.compile(r'\{[^{}]*?"resource_?[iI]d"\s*:\s*"(' + _UUID + r')"[^{}]*\}')
+_NAME = re.compile(r'"name"\s*:\s*"([^"]+)"')
+_SPORT = re.compile(r'"sport(?:_id)?"\s*:\s*"([^"]+)"')
+
+
+def parse_court_names(html: str) -> dict[str, str]:
+    """Extrae resourceId -> name del payload embebido en la web del club.
+
+    La página lleva los recursos como JSON escapado dentro de un <script>
+    ({\\"resourceId\\":\\"...\\",\\"name\\":\\"Padel 7\\",...}), así que se desescapa
+    y se buscan los objetos planos que contienen resourceId + name.
+    """
+    text = html.replace('\\"', '"')
+    names: dict[str, str] = {}
+    for m in _RESOURCE_OBJ.finditer(text):
+        obj = m.group(0)
+        name = _NAME.search(obj)
+        sport = _SPORT.search(obj)
+        if not name or (sport and sport.group(1) != SPORT_ID):
+            continue
+        names.setdefault(m.group(1), name.group(1).strip())
+    return names
 
 
 def fetch_court_names(client: httpx.Client) -> dict[str, str]:
-    """Resuelve resource_id -> nombre real ("Padel 1"...) probando varios endpoints."""
-    for url in RESOURCE_URLS:
-        try:
-            names: dict[str, str] = {}
-            _collect_names(get_json(client, url), names)
-            if names:
-                log.info("Nombres de pistas resueltos vía %s (%d)", url, len(names))
-                return names
-        except (httpx.HTTPError, ValueError) as exc:
-            log.warning("No se pudieron obtener nombres desde %s: %s", url, exc)
-    return {}
+    """Resuelve resource_id -> nombre real ("Padel 1"...) desde la web del club."""
+    try:
+        resp = client.get(CLUB_URL)
+        resp.raise_for_status()
+        names = parse_court_names(resp.text)
+        if names:
+            log.info("Nombres de pistas resueltos desde la web del club (%d)", len(names))
+        else:
+            log.warning("La web del club no contiene nombres de pistas reconocibles")
+        return names
+    except httpx.HTTPError as exc:
+        log.warning("No se pudieron obtener nombres desde %s: %s", CLUB_URL, exc)
+        return {}
 
 
 def court_label(resource_id: str, names: dict[str, str]) -> str:

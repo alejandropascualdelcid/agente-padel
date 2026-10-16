@@ -42,17 +42,30 @@ def availability(day: str):
     ]
 
 
+CLUB_HTML = (
+    '<html><script>self.__next_f.push([1,"{\\"resources\\":['
+    '{\\"resourceId\\":\\"' + RID_A + '\\",\\"name\\":\\"Padel 6\\",\\"sport\\":\\"PADEL\\",'
+    '\\"features\\":[\\"indoor\\",\\"double\\"]},'
+    '{\\"resourceId\\":\\"' + RID_B + '\\",\\"name\\":\\"Padel 1\\",\\"sport\\":\\"PADEL\\",'
+    '\\"features\\":[\\"outdoor\\"]},'
+    '{\\"resourceId\\":\\"cccccccc-0000-0000-0000-000000000003\\",\\"name\\":\\"Tenis 1\\",'
+    '\\"sport\\":\\"TENNIS\\",\\"features\\":[]}'
+    ']}"])</script></html>'
+)
+
+
+def test_parse_court_names_from_club_page():
+    assert mp.parse_court_names(CLUB_HTML) == {RID_A: "Padel 6", RID_B: "Padel 1"}
+
+
 def make_client(sent, avail=availability, fail_dates=()):
     def handler(request: httpx.Request):
         url = str(request.url)
         if "api.telegram.org" in url:
             sent.append(json.loads(request.content))
             return httpx.Response(200, json={"ok": True})
-        if "/resources" in url:
-            return httpx.Response(200, json=[
-                {"resource_id": RID_A, "name": "Padel 6", "sport_id": "PADEL"},
-                {"resource_id": RID_B, "name": "Padel 1", "sport_id": "PADEL"},
-            ])
+        if url == mp.CLUB_URL:
+            return httpx.Response(200, text=CLUB_HTML)
         if "availability" in url:
             d = request.url.params["date"]
             if d in fail_dates:
