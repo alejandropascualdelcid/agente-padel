@@ -121,7 +121,7 @@ def test_run_once_notifies_then_dedups(tmp_path):
         text = sent[0]["text"]
         assert "📅 *Jue 15/10*" in text
         assert "• 18:30 ➜ Padel 6 (4.29 EUR)" in text
-        assert "[Reservar Lun 19/10](https://playtomic.com/clubs/coslada-dreamfit?date=2026-10-19)" in text
+        assert "[Reservar Lun 19/10](https://playtomic.com/tenant/a328dd8a-031b-4230-adc5-928a53d16ad6?date=2026-10-19)" in text
         assert "Sáb" not in text and "17:30" not in text
         assert sent[0]["parse_mode"] == "Markdown"
 

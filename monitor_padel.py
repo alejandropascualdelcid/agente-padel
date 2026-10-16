@@ -37,6 +37,8 @@ SPORT_ID = "PADEL"
 CLUB_SLUG = "coslada-dreamfit"
 CLUB_NAME = "Coslada Dreamfit"
 CLUB_URL = f"https://playtomic.com/clubs/{CLUB_SLUG}"
+# Enlace que genera la propia app al compartir el club: en el móvil abre la app de Playtomic.
+BOOKING_URL = f"https://playtomic.com/tenant/{TENANT_ID}"
 AVAILABILITY_URL = "https://playtomic.com/api/clubs/availability"
 TZ = ZoneInfo("Europe/Madrid")
 HTTP_TIMEOUT = httpx.Timeout(10.0, connect=8.0)
@@ -269,6 +271,10 @@ def md_escape(text: str) -> str:
     return text
 
 
+def booking_link(d: date) -> str:
+    return f"{BOOKING_URL}?date={d.isoformat()}"
+
+
 def day_label(d: date) -> str:
     return f"{WEEKDAYS_ES[d.weekday()]} {d:%d/%m}"
 
@@ -288,7 +294,7 @@ def format_messages(slots: list[Slot], cfg: Config) -> list[str]:
         for s in day_slots:
             price = f" ({md_escape(s.price)})" if s.price else ""
             lines.append(f"• {s.start} ➜ {md_escape(s.court)}{price}")
-        lines.append(f"👉 [Reservar {day_label(d)}]({CLUB_URL}?date={d.isoformat()})")
+        lines.append(f"👉 [Reservar {day_label(d)}]({booking_link(d)})")
         blocks.append("\n".join(lines))
 
     messages: list[str] = []
