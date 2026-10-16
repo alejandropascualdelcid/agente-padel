@@ -4,21 +4,30 @@ from datetime import date, datetime
 from pathlib import Path
 
 import httpx
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import monitor_padel as mp  # noqa: E402
 
 RID_A = "aaaaaaaa-0000-0000-0000-000000000001"
 RID_B = "bbbbbbbb-0000-0000-0000-000000000002"
+TENANT_2 = "dddddddd-0000-0000-0000-000000000004"
+NOW = datetime(2026, 10, 15, 10, 0, tzinfo=mp.TZ)  # jueves
+COSLADA = mp.Club(**mp.DEFAULT_CLUB)
+OTHER = mp.Club(tenant_id=TENANT_2, name="Otro Club", page_url="https://playtomic.com/clubs/otro-club")
 
 
-def cfg(tmp_path, **kw):
-    base = dict(
-        bot_token="T", chat_id="1", days_ahead=12, start_min="18:30", start_max="21:00",
-        duration=90, interval=60, state_file=tmp_path / "state.json", court_names={},
+def settings(tmp_path):
+    return mp.Settings(
+        bot_token="T", chat_id="1", interval=60,
+        state_file=tmp_path / "state.json", config_file=tmp_path / "config.json",
     )
-    base.update(kw)
-    return mp.Config(**base)
+
+
+def write_prefs(tmp_path, **kw):
+    prefs = mp.Prefs(**kw)
+    mp.write_json(tmp_path / "config.json", prefs.to_dict())
+    return prefs
 
 
 def availability(day: str):
@@ -44,7 +53,8 @@ def availability(day: str):
 
 
 CLUB_HTML = (
-    '<html><script>self.__next_f.push([1,"{\\"resources\\":['
+    '<html><head><meta property="og:title" content="Otro Club | Playtomic"></head>'
+    '<script>self.__next_f.push([1,"{\\"tenantId\\":\\"' + TENANT_2 + '\\",\\"resources\\":['
     '{\\"resourceId\\":\\"' + RID_A + '\\",\\"name\\":\\"Padel 6\\",\\"sport\\":\\"PADEL\\",'
     '\\"features\\":[\\"indoor\\",\\"double\\"]},'
     '{\\"resourceId\\":\\"' + RID_B + '\\",\\"name\\":\\"Padel 1\\",\\"sport\\":\\"PADEL\\",'
@@ -55,121 +65,282 @@ CLUB_HTML = (
 )
 
 
-def test_parse_court_names_from_club_page():
-    assert mp.parse_court_names(CLUB_HTML) == {RID_A: "Padel 6", RID_B: "Padel 1"}
+class FakeServer:
+    """Simula Playtomic y Telegram. Guarda lo enviado al bot y sirve updates encolados."""
 
+    def __init__(self, avail=availability, fail_dates=()):
+        self.avail = avail
+        self.fail_dates = set(fail_dates)
+        self.sent: list[dict] = []
+        self.edited: list[dict] = []
+        self.updates: list[dict] = []
+        self.availability_calls: list[tuple[str, str]] = []
 
-def make_client(sent, avail=availability, fail_dates=()):
-    def handler(request: httpx.Request):
+    def handler(self, request: httpx.Request):
         url = str(request.url)
         if "api.telegram.org" in url:
-            sent.append(json.loads(request.content))
-            return httpx.Response(200, json={"ok": True})
-        if url == mp.CLUB_URL:
-            return httpx.Response(200, text=CLUB_HTML)
+            method = url.rsplit("/", 1)[1]
+            body = json.loads(request.content or b"{}")
+            if method == "getUpdates":
+                pending = [u for u in self.updates if u["update_id"] >= body.get("offset", 0)]
+                return httpx.Response(200, json={"ok": True, "result": pending})
+            if method == "sendMessage":
+                self.sent.append(body)
+            elif method == "editMessageText":
+                self.edited.append(body)
+            return httpx.Response(200, json={"ok": True, "result": True})
         if "availability" in url:
-            d = request.url.params["date"]
-            if d in fail_dates:
+            d, tenant = request.url.params["date"], request.url.params["tenant_id"]
+            self.availability_calls.append((tenant, d))
+            if d in self.fail_dates:
                 return httpx.Response(403)
-            return httpx.Response(200, json=avail(d))
+            return httpx.Response(200, json=self.avail(d))
+        if "/clubs/" in url or "/tenant/" in url:
+            return httpx.Response(200, text=CLUB_HTML)
         return httpx.Response(404)
 
-    return httpx.Client(transport=httpx.MockTransport(handler))
+    def client(self):
+        return httpx.Client(transport=httpx.MockTransport(self.handler))
+
+    def texts(self):
+        return [m["text"] for m in self.sent]
 
 
-def test_target_days_only_weekdays():
-    days = mp.target_days(date(2026, 10, 15), 12)  # jueves
+def message(update_id, text, chat=1):
+    return {"update_id": update_id, "message": {"chat": {"id": chat}, "text": text}}
+
+
+def callback(update_id, data, chat=1):
+    return {
+        "update_id": update_id,
+        "callback_query": {"id": f"cb{update_id}", "data": data,
+                           "message": {"chat": {"id": chat}, "message_id": 99}},
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Filtro y formato
+# --------------------------------------------------------------------------- #
+def test_target_days_only_selected_weekdays():
+    days = mp.target_days(date(2026, 10, 15), mp.Prefs())
     assert all(d.weekday() < 5 for d in days)
     assert days[0] == date(2026, 10, 15) and days[-1] == date(2026, 10, 27)
     assert len(days) == 9
+    weekend = mp.target_days(date(2026, 10, 15), mp.Prefs(weekdays=[5, 6], days_ahead=7))
+    assert [d.isoformat() for d in weekend] == ["2026-10-17", "2026-10-18"]
 
 
-def test_filter_converts_utc_to_madrid(tmp_path):
-    now = datetime(2026, 10, 15, 10, 0, tzinfo=mp.TZ)
+def test_filter_converts_utc_to_madrid():
     names = {RID_A: "Padel 6", RID_B: "Padel 1"}
-    slots = mp.filter_slots(availability("2026-10-16"), date(2026, 10, 16), cfg(tmp_path), names, now)
+    slots = mp.filter_slots(availability("2026-10-16"), COSLADA, date(2026, 10, 16), mp.Prefs(), names, NOW)
     assert [(s.start, s.court) for s in slots] == [("18:30", "Padel 6"), ("20:00", "Padel 1"), ("21:00", "Padel 6")]
 
 
-def test_dst_change_real_case(tmp_path):
+def test_dst_change_real_case():
     """Caso real: el turno de las 21:30 llegaba como 19:30 (CEST) y 20:30 (CET)."""
-    now = datetime(2026, 10, 16, 2, 0, tzinfo=mp.TZ)
-    c = cfg(tmp_path)
+    prefs = mp.Prefs()
     for day, utc in ((date(2026, 10, 22), "19:30:00"), (date(2026, 10, 26), "20:30:00")):
         raw = [{"resource_id": RID_A, "start_date": day.isoformat(),
                 "slots": [{"start_time": utc, "duration": 90, "price": "4.29 EUR"}]}]
-        assert mp.filter_slots(raw, day, c, {}, now) == []
-    # Tras el cambio de hora, 18:30 en Madrid es 17:30 UTC.
+        assert mp.filter_slots(raw, COSLADA, day, prefs, {}, NOW) == []
     raw = [{"resource_id": RID_A, "start_date": "2026-10-26",
             "slots": [{"start_time": "17:30:00", "duration": 90, "price": "4.29 EUR"}]}]
-    assert [s.start for s in mp.filter_slots(raw, date(2026, 10, 26), c, {}, now)] == ["18:30"]
+    assert [s.start for s in mp.filter_slots(raw, COSLADA, date(2026, 10, 26), prefs, {}, NOW)] == ["18:30"]
 
 
-def test_filter_skips_past_slots_today(tmp_path):
+def test_filter_skips_past_slots_today():
     now = datetime(2026, 10, 15, 19, 0, tzinfo=mp.TZ)
-    slots = mp.filter_slots(availability("2026-10-15"), date(2026, 10, 15), cfg(tmp_path), {}, now)
+    slots = mp.filter_slots(availability("2026-10-15"), COSLADA, date(2026, 10, 15), mp.Prefs(), {}, now)
     assert [s.start for s in slots] == ["20:00", "21:00"]
 
 
-def test_run_once_notifies_then_dedups(tmp_path):
-    c = cfg(tmp_path)
-    now = datetime(2026, 10, 15, 10, 0, tzinfo=mp.TZ)
-    sent = []
-    with make_client(sent) as client:
-        assert mp.run_once(c, client, now=now) == 0
-        assert len(sent) == 1
-        text = sent[0]["text"]
-        assert "📅 *Jue 15/10*" in text
-        assert "• 18:30 ➜ Padel 6 (4.29 EUR)" in text
-        assert "[Reservar Lun 19/10](https://playtomic.com/tenant/a328dd8a-031b-4230-adc5-928a53d16ad6?date=2026-10-19)" in text
-        assert "Sáb" not in text and "17:30" not in text
-        assert sent[0]["parse_mode"] == "Markdown"
-
-        assert mp.run_once(c, client, now=now) == 0
-        assert len(sent) == 1  # sin repetir
+def test_filter_multiple_durations():
+    prefs = mp.Prefs(durations=[60, 90])
+    slots = mp.filter_slots(availability("2026-10-16"), COSLADA, date(2026, 10, 16), prefs, {}, NOW)
+    assert ("20:30", 60) in [(s.start, s.duration) for s in slots]
 
 
-def test_failed_day_does_not_renotify(tmp_path):
-    c = cfg(tmp_path)
-    now = datetime(2026, 10, 15, 10, 0, tzinfo=mp.TZ)
-    sent = []
-    with make_client(sent) as client:
-        mp.run_once(c, client, now=now)
-    with make_client(sent, fail_dates={"2026-10-16"}) as client:
-        mp.run_once(c, client, now=now)
-    with make_client(sent) as client:
-        mp.run_once(c, client, now=now)
-    assert len(sent) == 1
-
-
-def test_slot_freed_again_is_renotified(tmp_path):
-    c = cfg(tmp_path)
-    now = datetime(2026, 10, 15, 10, 0, tzinfo=mp.TZ)
-    sent = []
-    with make_client(sent) as client:
-        mp.run_once(c, client, now=now)
-    with make_client(sent, avail=lambda d: []) as client:
-        mp.run_once(c, client, now=now)  # todo reservado
-    with make_client(sent) as client:
-        mp.run_once(c, client, now=now)  # se liberan de nuevo
-    assert len(sent) == 2
-
-
-def test_all_days_failing_returns_error(tmp_path):
-    c = cfg(tmp_path)
-    now = datetime(2026, 10, 15, 10, 0, tzinfo=mp.TZ)
-    days = {d.isoformat() for d in mp.target_days(now.date(), 12)}
-    with make_client([], fail_dates=days) as client:
-        assert mp.run_once(c, client, now=now) == 1
-
-
-def test_courts_sorted_numerically(tmp_path):
-    c = cfg(tmp_path)
-    now = datetime(2026, 10, 15, 10, 0, tzinfo=mp.TZ)
+def test_message_grouped_by_club_and_sorted():
     names = {RID_A: "Padel 11", RID_B: "Padel 3"}
     raw = [{"resource_id": rid, "start_date": "2026-10-16",
             "slots": [{"start_time": "18:00:00", "duration": 90, "price": "4.29 EUR"}]}
            for rid in (RID_A, RID_B)]
-    slots = mp.filter_slots(raw, date(2026, 10, 16), c, names, now)
-    text = mp.format_messages(sorted(slots, key=mp.slot_sort_key), c)[0]
+    prefs = mp.Prefs()
+    slots = (mp.filter_slots(raw, COSLADA, date(2026, 10, 16), prefs, names, NOW)
+             + mp.filter_slots(raw, OTHER, date(2026, 10, 16), prefs, names, NOW))
+    text = mp.format_messages(slots, prefs)[0]
+    assert text.count("🏟") == 2
+    assert text.index("Coslada Dreamfit") < text.index("Otro Club")
     assert text.index("Padel 3") < text.index("Padel 11")
+    assert f"https://playtomic.com/tenant/{TENANT_2}?date=2026-10-16" in text
+
+
+# --------------------------------------------------------------------------- #
+# Página del club
+# --------------------------------------------------------------------------- #
+def test_parse_club_page():
+    assert mp.parse_court_names(CLUB_HTML) == {RID_A: "Padel 6", RID_B: "Padel 1"}
+    assert mp.parse_club_name(CLUB_HTML) == "Otro Club"
+    assert mp.parse_tenant_id(CLUB_HTML) == TENANT_2
+
+
+@pytest.mark.parametrize("link", [
+    f"Checkout the club! https://playtomic.com/tenant/{TENANT_2}?utm_source=app_ios&utm_campaign=share",
+    "https://playtomic.com/clubs/otro-club",
+])
+def test_resolve_club_from_links(link):
+    srv = FakeServer()
+    with srv.client() as client:
+        club = mp.resolve_club(client, link)
+    assert (club.tenant_id, club.name) == (TENANT_2, "Otro Club")
+
+
+# --------------------------------------------------------------------------- #
+# Ciclo completo y anti-spam
+# --------------------------------------------------------------------------- #
+def test_run_once_notifies_then_dedups(tmp_path):
+    s = settings(tmp_path)
+    srv = FakeServer()
+    with srv.client() as client:
+        assert mp.run_once(s, client, now=NOW) == 0
+        assert len(srv.sent) == 1
+        text = srv.sent[0]["text"]
+        assert "🏟 *Coslada Dreamfit*" in text and "📅 *Jue 15/10*" in text
+        assert "• 18:30 ➜ Padel 6 (4.29 EUR)" in text  # nombres desde la web del club
+        assert "Sáb" not in text and "17:30" not in text
+        assert srv.sent[0]["parse_mode"] == "Markdown"
+        assert mp.run_once(s, client, now=NOW) == 0
+    assert len(srv.sent) == 1  # sin repetir
+
+
+def test_failed_day_does_not_renotify(tmp_path):
+    s = settings(tmp_path)
+    srv = FakeServer()
+    with srv.client() as client:
+        mp.run_once(s, client, now=NOW)
+        srv.fail_dates = {"2026-10-16"}
+        mp.run_once(s, client, now=NOW)
+        srv.fail_dates = set()
+        mp.run_once(s, client, now=NOW)
+    assert len(srv.sent) == 1
+
+
+def test_slot_freed_again_is_renotified(tmp_path):
+    s = settings(tmp_path)
+    srv = FakeServer()
+    with srv.client() as client:
+        mp.run_once(s, client, now=NOW)
+        srv.avail = lambda d: []
+        mp.run_once(s, client, now=NOW)
+        srv.avail = availability
+        mp.run_once(s, client, now=NOW)
+    assert len(srv.sent) == 2
+
+
+def test_all_failing_returns_error(tmp_path):
+    s = settings(tmp_path)
+    days = {d.isoformat() for d in mp.target_days(NOW.date(), mp.Prefs())}
+    with FakeServer(fail_dates=days).client() as client:
+        assert mp.run_once(s, client, now=NOW) == 1
+
+
+def test_only_active_clubs_are_scanned(tmp_path):
+    s = settings(tmp_path)
+    write_prefs(tmp_path, clubs=[COSLADA, mp.Club(**{**OTHER.__dict__, "enabled": False})])
+    srv = FakeServer()
+    with srv.client() as client:
+        mp.run_once(s, client, now=NOW)
+    assert {t for t, _ in srv.availability_calls} == {COSLADA.tenant_id}
+
+
+def test_paused_does_not_scan(tmp_path):
+    s = settings(tmp_path)
+    write_prefs(tmp_path, paused=True)
+    srv = FakeServer()
+    with srv.client() as client:
+        mp.run_once(s, client, now=NOW)
+    assert srv.availability_calls == [] and srv.sent == []
+
+
+# --------------------------------------------------------------------------- #
+# Bot de Telegram
+# --------------------------------------------------------------------------- #
+def test_menu_command_and_buttons(tmp_path):
+    s = settings(tmp_path)
+    write_prefs(tmp_path, clubs=[COSLADA, OTHER])
+    srv = FakeServer()
+    srv.updates = [
+        message(1, "/menu"),
+        callback(2, f"club:{TENANT_2}:0"),
+        callback(3, "day:5:1"),
+        callback(4, "fr:min:19:00"),
+        callback(5, "du:60:1"),
+        callback(6, "pause:1"),
+    ]
+    with srv.client() as client:
+        mp.run_once(s, client, now=NOW)
+    assert "Configuración del monitor" in srv.texts()[0]
+    prefs = mp.load_prefs(s.config_file)
+    assert prefs.club(TENANT_2).enabled is False
+    assert prefs.weekdays == [0, 1, 2, 3, 4, 5]
+    assert (prefs.start_min, prefs.start_max) == ("19:00", "21:00")
+    assert prefs.durations == [60, 90]
+    assert prefs.paused is True
+    assert len(srv.edited) == 5
+    assert srv.availability_calls == []  # en pausa
+    assert mp.load_state(s.state_file)["tg_offset"] == 7
+
+
+def test_replayed_updates_are_idempotent(tmp_path):
+    s = settings(tmp_path)
+    write_prefs(tmp_path, clubs=[COSLADA, OTHER])
+    srv = FakeServer()
+    srv.updates = [callback(1, f"club:{TENANT_2}:0")]
+    with srv.client() as client:
+        mp.run_once(s, client, now=NOW)
+        s.state_file.unlink()  # se pierde la caché: Telegram reentrega el mismo botón
+        mp.run_once(s, client, now=NOW)
+    assert mp.load_prefs(s.config_file).club(TENANT_2).enabled is False
+
+
+def test_ignores_other_chats(tmp_path):
+    s = settings(tmp_path)
+    write_prefs(tmp_path, clubs=[COSLADA, OTHER])
+    srv = FakeServer()
+    srv.updates = [callback(1, f"club:{TENANT_2}:0", chat=666), message(2, "/pausa", chat=666)]
+    with srv.client() as client:
+        mp.run_once(s, client, now=NOW)
+    prefs = mp.load_prefs(s.config_file)
+    assert prefs.club(TENANT_2).enabled and not prefs.paused
+
+
+def test_add_club_by_sharing_link(tmp_path):
+    s = settings(tmp_path)
+    srv = FakeServer()
+    srv.updates = [message(1, f"Checkout the club! https://playtomic.com/tenant/{TENANT_2}?utm_source=app_ios")]
+    with srv.client() as client:
+        mp.run_once(s, client, now=NOW)
+    prefs = mp.load_prefs(s.config_file)
+    assert [c.name for c in prefs.clubs] == ["Coslada Dreamfit", "Otro Club"]
+    assert any("Añadido *Otro Club*" in t for t in srv.texts())
+
+
+def test_buscar_sends_full_listing_even_if_already_notified(tmp_path):
+    s = settings(tmp_path)
+    srv = FakeServer()
+    with srv.client() as client:
+        mp.run_once(s, client, now=NOW)
+        srv.updates = [message(1, "/buscar")]
+        mp.run_once(s, client, now=NOW)
+    assert any("Pistas libres ahora" in t for t in srv.texts())
+
+
+def test_franja_command(tmp_path):
+    s = settings(tmp_path)
+    srv = FakeServer()
+    srv.updates = [message(1, "/franja 18:00 21:30"), message(2, "/franja 22:00 18:00")]
+    with srv.client() as client:
+        mp.run_once(s, client, now=NOW)
+    prefs = mp.load_prefs(s.config_file)
+    assert (prefs.start_min, prefs.start_max) == ("18:00", "21:30")
+    assert any("Formato" in t for t in srv.texts())

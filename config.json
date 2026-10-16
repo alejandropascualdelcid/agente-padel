@@ -1,0 +1,24 @@
+{
+  "clubs": [
+    {
+      "tenant_id": "a328dd8a-031b-4230-adc5-928a53d16ad6",
+      "name": "Coslada Dreamfit",
+      "page_url": "https://playtomic.com/clubs/coslada-dreamfit",
+      "enabled": true
+    }
+  ],
+  "weekdays": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "start_min": "18:30",
+  "start_max": "21:00",
+  "durations": [
+    90
+  ],
+  "days_ahead": 12,
+  "paused": false
+}
