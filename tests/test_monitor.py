@@ -68,8 +68,9 @@ CLUB_HTML = (
 class FakeServer:
     """Simula Playtomic y Telegram. Guarda lo enviado al bot y sirve updates encolados."""
 
-    def __init__(self, avail=availability, fail_dates=()):
+    def __init__(self, avail=availability, fail_dates=(), other_tenants=None):
         self.avail = avail
+        self.other_tenants = other_tenants or {}  # tenant_id -> respuesta fija
         self.fail_dates = set(fail_dates)
         self.sent: list[dict] = []
         self.edited: list[dict] = []
@@ -94,6 +95,8 @@ class FakeServer:
             self.availability_calls.append((tenant, d))
             if d in self.fail_dates:
                 return httpx.Response(403)
+            if tenant in self.other_tenants:
+                return httpx.Response(200, json=self.other_tenants[tenant])
             return httpx.Response(200, json=self.avail(d))
         if "/clubs/" in url or "/tenant/" in url:
             return httpx.Response(200, text=CLUB_HTML)
@@ -181,7 +184,7 @@ def test_message_grouped_by_club_and_sorted():
 def test_parse_club_page():
     assert mp.parse_court_names(CLUB_HTML) == {RID_A: "Padel 6", RID_B: "Padel 1"}
     assert mp.parse_club_name(CLUB_HTML) == "Otro Club"
-    assert mp.parse_tenant_id(CLUB_HTML) == TENANT_2
+    assert mp.tenant_candidates(CLUB_HTML)[0] == TENANT_2
 
 
 @pytest.mark.parametrize("link", [
@@ -365,3 +368,38 @@ def test_add_club_cli_with_custom_name(tmp_path):
     with FakeServer().client() as client:
         assert mp.add_club_cli(s, client, "https://playtomic.com/clubs/otro-club", "ProPadel") == 0
     assert mp.load_prefs(s.config_file).club(TENANT_2).name == "ProPadel"
+
+
+def test_slug_link_ignores_recommended_clubs(tmp_path):
+    """La página /clubs/<slug> enseña otros clubes; hay que elegir el que tiene sus pistas."""
+    recommended = "eeeeeeee-0000-0000-0000-000000000005"
+    page = CLUB_HTML.replace("</html>", ('<script>{\\"tenantId\\":\\"' + recommended + '\\"}</script>') * 5 + "</html>")
+    assert mp.tenant_candidates(page)[0] == recommended  # el más repetido es el equivocado
+    other_courts = [{"resource_id": "ffffffff-0000-0000-0000-000000000006", "start_date": "2026-10-16", "slots": []}]
+    srv = FakeServer(other_tenants={recommended: other_courts})
+    with srv.client() as client:
+        assert mp.find_tenant_id(client, page) == TENANT_2
+
+
+def test_durations_merged_in_one_line():
+    prefs = mp.Prefs(durations=[90, 120])
+    raw = [{"resource_id": RID_A, "start_date": "2026-10-16", "slots": [
+        {"start_time": "16:30:00", "duration": 90, "price": "36.66 EUR"},
+        {"start_time": "16:30:00", "duration": 120, "price": "48.88 EUR"},
+    ]}]
+    slots = mp.filter_slots(raw, COSLADA, date(2026, 10, 16), prefs, {RID_A: "Pista 1"}, NOW)
+    text = mp.format_messages(slots, prefs)[0]
+    assert "• 18:30 ➜ Pista 1 · 90'/120' (36.66 / 48.88 EUR)" in text
+    assert text.count("Pista 1") == 1
+
+
+def test_clubs_with_same_name_not_interleaved():
+    prefs = mp.Prefs()
+    twin = mp.Club(tenant_id=TENANT_2, name=COSLADA.name, page_url="")
+    slots = []
+    for d in ("2026-10-16", "2026-10-19"):
+        day = date.fromisoformat(d)
+        slots += mp.filter_slots(availability(d), COSLADA, day, prefs, {}, NOW)
+        slots += mp.filter_slots(availability(d), twin, day, prefs, {}, NOW)
+    text = mp.format_messages(slots, prefs)[0]
+    assert text.count("🏟") == 2

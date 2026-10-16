@@ -207,7 +207,8 @@ class Slot:
 def slot_sort_key(slot: Slot):
     """Club, día, hora y número de pista como número (Padel 3 antes que Padel 11)."""
     digits = "".join(ch for ch in slot.court if ch.isdigit())
-    return (slot.club.name, slot.day, slot.start, int(digits) if digits else 999, slot.court)
+    return (slot.club.name, slot.club.tenant_id, slot.day, slot.start,
+            int(digits) if digits else 999, slot.court, slot.duration)
 
 
 # --------------------------------------------------------------------------- #
@@ -277,12 +278,6 @@ def parse_club_name(html: str) -> str | None:
     return title or None
 
 
-def parse_tenant_id(html: str) -> str | None:
-    """El tenant_id más repetido en la página (el del propio club)."""
-    found = _TENANT_ID.findall(_unescape_payload(html))
-    return max(set(found), key=found.count) if found else None
-
-
 def fetch_court_names(client: httpx.Client, club: Club) -> dict[str, str]:
     try:
         resp = client.get(club.page_url)
@@ -308,14 +303,52 @@ def resolve_club(client: httpx.Client, url: str) -> Club:
     page = f"{PLAYTOMIC}/tenant/{tenant_id}" if tenant_id else f"{PLAYTOMIC}/clubs/{slug}"
     resp = client.get(page)
     resp.raise_for_status()
-    tenant_id = tenant_id or parse_tenant_id(resp.text)
-    if not tenant_id:
-        raise ValueError("No encuentro el identificador del club en su página")
-    name = parse_club_name(resp.text) or f"Club {tenant_id[:8]}"
-    club = Club(tenant_id=tenant_id, name=name, page_url=str(resp.url))
-    # Validación: la API de disponibilidad tiene que responder para este club.
-    fetch_availability(client, club, datetime.now(TZ).date())
-    return club
+    name = parse_club_name(resp.text) or "Club"
+    page_url = str(resp.url)
+    if tenant_id:
+        club = Club(tenant_id=tenant_id, name=name, page_url=page_url)
+        fetch_availability(client, club, datetime.now(TZ).date())  # validación
+        return club
+    tenant_id = find_tenant_id(client, resp.text)
+    return Club(tenant_id=tenant_id, name=name, page_url=page_url)
+
+
+def tenant_candidates(html: str) -> list[str]:
+    """UUIDs de la página que podrían ser el club: primero los marcados como tenantId,
+    luego el resto, por frecuencia. Se excluyen los de las pistas."""
+    text = _unescape_payload(html)
+    resources = set(parse_court_names(html))
+    keyed = _TENANT_ID.findall(text)
+    others = [u for u in re.findall(_UUID, text) if u not in resources]
+    ordered: list[str] = []
+    for pool in (keyed, others):
+        for u in sorted(set(pool), key=lambda x: -pool.count(x)):
+            if u not in ordered and u not in resources:
+                ordered.append(u)
+    return ordered
+
+
+def find_tenant_id(client: httpx.Client, html: str, max_candidates: int = 25) -> str:
+    """Identifica el club de una página /clubs/<slug>.
+
+    La página también enseña otros clubes (cercanos, recomendados), así que no basta
+    con el identificador más repetido: se prueba cada candidato contra la API y se
+    elige aquel cuyas pistas coinciden con las de la página.
+    """
+    page_courts = set(parse_court_names(html))
+    if not page_courts:
+        raise ValueError("La página no lista pistas; usa el enlace de Compartir de la app")
+    today = datetime.now(TZ).date()
+    for candidate in tenant_candidates(html)[:max_candidates]:
+        probe = Club(tenant_id=candidate, name="", page_url="")
+        for d in (today, today + timedelta(days=1)):
+            try:
+                raw = fetch_availability(client, probe, d)
+            except (httpx.HTTPError, ValueError):
+                break
+            if {r.get("resource_id") for r in raw} & page_courts:
+                return candidate
+    raise ValueError("No he podido identificar el club; usa el enlace de Compartir de la app")
 
 
 # --------------------------------------------------------------------------- #
@@ -408,6 +441,20 @@ def day_label(d: date) -> str:
     return f"{WEEKDAYS_ES[d.weekday()]} {d:%d/%m}"
 
 
+def format_prices(variants: list[Slot]) -> str:
+    """'(36.66 EUR)' o, con varias duraciones, '(36.66 / 48.88 EUR)'."""
+    prices = [v.price for v in variants if v.price]
+    if not prices:
+        return ""
+    parts = [p.rsplit(" ", 1) for p in prices]
+    currencies = {pp[1] for pp in parts if len(pp) == 2}
+    if len(currencies) == 1 and all(len(pp) == 2 for pp in parts):
+        text = " / ".join(pp[0] for pp in parts) + " " + currencies.pop()
+    else:
+        text = " / ".join(prices)
+    return f" ({md_escape(text)})"
+
+
 def format_messages(slots: list[Slot], prefs: Prefs, title: str = "🎾 *¡Pistas libres!*") -> list[str]:
     """Agrupa por club y día; trocea en varios mensajes si excede el límite de Telegram."""
     header = f"{title}\n🕡 Inicio {prefs.start_min}–{prefs.start_max}\n"
@@ -421,10 +468,12 @@ def format_messages(slots: list[Slot], prefs: Prefs, title: str = "🎾 *¡Pista
     for (_, d), day_slots in groups.items():
         club = day_slots[0].club
         lines = [f"📅 *{day_label(d)}*"]
+        merged: dict[tuple[str, str], list[Slot]] = {}
         for s in day_slots:
-            extra = f" · {s.duration}'" if show_duration else ""
-            price = f" ({md_escape(s.price)})" if s.price else ""
-            lines.append(f"• {s.start} ➜ {md_escape(s.court)}{extra}{price}")
+            merged.setdefault((s.start, s.court), []).append(s)
+        for (start, court), variants in merged.items():
+            extra = " · " + "/".join(f"{v.duration}'" for v in variants) if show_duration else ""
+            lines.append(f"• {start} ➜ {md_escape(court)}{extra}{format_prices(variants)}")
         lines.append(f"👉 [Reservar {day_label(d)}]({booking_link(club, d)})")
         block = "\n".join(lines)
         club_header = f"\n🏟 *{md_escape(club.name)}*" if club.tenant_id != current_club else ""
