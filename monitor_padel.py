@@ -565,11 +565,20 @@ def menu_clubs(prefs: Prefs) -> tuple[str, dict]:
     rows = [
         [
             _btn(f"{'✅' if c.enabled else '▫️'} {c.name}", f"club:{c.tenant_id}:{0 if c.enabled else 1}"),
-            _btn("🗑", f"del:{c.tenant_id}"),
+            _btn("🗑", f"delask:{c.tenant_id}"),
         ]
         for c in prefs.clubs
     ]
     return text, {"inline_keyboard": rows + [_back()]}
+
+
+def menu_confirm_delete(prefs: Prefs, tenant_id: str) -> tuple[str, dict]:
+    club = prefs.club(tenant_id)
+    if not club:
+        return menu_clubs(prefs)
+    text = f"🗑 ¿Seguro que quieres eliminar *{md_escape(club.name)}*?\n\nSi solo quieres dejar de vigilarlo, mejor desactívalo."
+    rows = [[_btn("Sí, eliminar", f"del:{tenant_id}"), _btn("Cancelar", "clubs")]]
+    return text, {"inline_keyboard": rows}
 
 
 def menu_days(prefs: Prefs) -> tuple[str, dict]:
@@ -741,6 +750,15 @@ def handle_callback(
         menu = "menu"
     elif data == "noop":
         menu = None
+    elif data.startswith("delask:"):
+        menu = None
+        try:
+            tg_call(client, settings, "answerCallbackQuery", callback_query_id=cq["id"])
+        except (httpx.HTTPError, TelegramError):
+            pass
+        if cq.get("message"):
+            edit_telegram(client, settings, cq["message"], *menu_confirm_delete(prefs, data.split(":", 1)[1]))
+        return
     else:
         menu, changed, notice = apply_callback(prefs, data)
         result.prefs_changed |= changed

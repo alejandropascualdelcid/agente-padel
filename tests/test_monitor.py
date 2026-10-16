@@ -344,3 +344,17 @@ def test_franja_command(tmp_path):
     prefs = mp.load_prefs(s.config_file)
     assert (prefs.start_min, prefs.start_max) == ("18:00", "21:30")
     assert any("Formato" in t for t in srv.texts())
+
+
+def test_delete_club_asks_confirmation(tmp_path):
+    s = settings(tmp_path)
+    write_prefs(tmp_path, clubs=[COSLADA, OTHER])
+    srv = FakeServer()
+    srv.updates = [callback(1, f"delask:{TENANT_2}")]
+    with srv.client() as client:
+        mp.run_once(s, client, now=NOW)
+        assert len(mp.load_prefs(s.config_file).clubs) == 2  # aún no se borra
+        assert "¿Seguro" in srv.edited[-1]["text"]
+        srv.updates = [callback(2, f"del:{TENANT_2}")]
+        mp.run_once(s, client, now=NOW)
+    assert [c.name for c in mp.load_prefs(s.config_file).clubs] == ["Coslada Dreamfit"]
