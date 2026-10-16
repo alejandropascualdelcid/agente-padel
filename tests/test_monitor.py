@@ -358,3 +358,10 @@ def test_delete_club_asks_confirmation(tmp_path):
         srv.updates = [callback(2, f"del:{TENANT_2}")]
         mp.run_once(s, client, now=NOW)
     assert [c.name for c in mp.load_prefs(s.config_file).clubs] == ["Coslada Dreamfit"]
+
+
+def test_add_club_cli_with_custom_name(tmp_path):
+    s = settings(tmp_path)
+    with FakeServer().client() as client:
+        assert mp.add_club_cli(s, client, "https://playtomic.com/clubs/otro-club", "ProPadel") == 0
+    assert mp.load_prefs(s.config_file).club(TENANT_2).name == "ProPadel"

@@ -957,16 +957,20 @@ def run_loop(settings: Settings, client: httpx.Client, dry_run: bool = False) ->
             time.sleep(5)
 
 
-def add_club_cli(settings: Settings, client: httpx.Client, url: str) -> int:
+def add_club_cli(settings: Settings, client: httpx.Client, url: str, name: str | None = None) -> int:
     prefs = load_prefs(settings.config_file)
     try:
         club = resolve_club(client, url)
     except (httpx.HTTPError, ValueError) as exc:
         log.error("No se pudo añadir el club: %s", exc)
         return 1
+    if name:
+        club.name = name
     existing = prefs.club(club.tenant_id)
     if existing:
         existing.enabled = True
+        if name:
+            existing.name = name
         print(f"Ya estaba: {existing.name} (activado)")
     else:
         prefs.clubs.append(club)
@@ -981,6 +985,7 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--once", action="store_true", help="una sola pasada (por defecto)")
     mode.add_argument("--loop", action="store_true", help="bucle infinito")
     mode.add_argument("--add-club", metavar="URL", help="añade un club a partir de su enlace de Playtomic")
+    parser.add_argument("--name", help="con --add-club: nombre con el que aparecerá el club")
     parser.add_argument("--interval", type=int, help="segundos entre escaneos en --loop")
     parser.add_argument("--dry-run", action="store_true", help="imprime en vez de enviar y no guarda estado")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -1002,7 +1007,7 @@ def main(argv: list[str] | None = None) -> int:
 
     with httpx.Client(headers=HEADERS, timeout=HTTP_TIMEOUT, follow_redirects=True) as client:
         if args.add_club:
-            return add_club_cli(settings, client, args.add_club)
+            return add_club_cli(settings, client, args.add_club, args.name)
         if args.loop:
             run_loop(settings, client, dry_run=args.dry_run)
             return 0
