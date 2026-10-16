@@ -2,9 +2,27 @@
   "clubs": [
     {
       "tenant_id": "a328dd8a-031b-4230-adc5-928a53d16ad6",
-      "name": "Coslada Dreamfit",
+      "name": "Dreamfit",
       "page_url": "https://playtomic.com/clubs/coslada-dreamfit",
       "enabled": true
+    },
+    {
+      "tenant_id": "da78253b-43b3-11e8-8674-52540049669c",
+      "name": "tenis padel coslada",
+      "page_url": "https://playtomic.com/clubs/club-de-tenis-y-padel-coslada",
+      "enabled": true
+    },
+    {
+      "tenant_id": "c9ec1f6d-dc1a-4335-ba14-5528559703f3",
+      "name": "ProPadel",
+      "page_url": "https://playtomic.com/clubs/pro-padel-coslada",
+      "enabled": false
+    },
+    {
+      "tenant_id": "da789ac8-43b3-11e8-8674-52540049669c",
+      "name": "Pistas Alameda",
+      "page_url": "https://playtomic.com/clubs/club-alameda",
+      "enabled": false
     }
   ],
   "weekdays": [
@@ -14,11 +32,12 @@
     3,
     4
   ],
-  "start_min": "18:30",
+  "start_min": "19:00",
   "start_max": "21:00",
   "durations": [
-    90
+    90,
+    120
   ],
-  "days_ahead": 12,
+  "days_ahead": 14,
   "paused": false
 }
